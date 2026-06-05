@@ -1,54 +1,105 @@
-# STM32 Custom Bootloader
+# STM32 Custom Bootloader (STM32F446xx)
 
-This repository contains a custom bootloader for STM32 microcontrollers.
+Custom UART bootloader for **STM32F446xx** (HAL / STM32CubeMX project).
 
-## Overview
+## Boot mode selection
 
-The project includes:
+In `bootloader_STM32F446xx/Core/Src/main.c`, the bootloader decides between **Bootloader mode** and **User application** using the blue user button on **PC13**:
 
-- Bootloader source code (C)
-- Build system files (Makefile)
-- Supporting scripts/configuration as needed
+- **PC13 pressed (GPIO_PIN_RESET)** → enter bootloader UART command loop (`bootloader_uart_read_data()`)
+- **PC13 not pressed** → jump to user application (`bootloader_jump_to_user_app()`)
 
-Everything needed to build and understand the bootloader is already in the repository; this README provides a high-level entry point and quick-start instructions.
+## UARTs
 
-## Getting started
+Defined in `bootloader_STM32F446xx/Core/Src/main.c`:
 
-### Prerequisites
+- **Command UART (Host ↔ MCU):** `USART2` (`C_UART = &huart2`)
+- **Debug UART (MCU → terminal):** `USART3` (`D_UART = &huart3`)
 
-You will typically need:
+Debug printing is enabled with `BL_DEBUG_MSG_EN`.
 
-- **ARM GNU Toolchain** (`arm-none-eabi-gcc`, `arm-none-eabi-ld`, etc.)
-- **make**
-- A way to flash STM32 devices (e.g., **ST-LINK**, **OpenOCD**, or **STM32CubeProgrammer**)
+## Bootloader protocol (frames)
 
-### Build
+### Host → MCU command frame
 
-From the repository root:
+The MCU first reads **1 byte** (length), then reads `length` bytes containing:
 
-```bash
-make
+```
++--------+--------------+--------------------+
+| LEN    | CMD          | CRC32              |
+| 1 byte | 1 byte       | 4 bytes (LSB first)|
++--------+--------------+--------------------+
 ```
 
-> If the project uses a different target (e.g., `make all`) or requires setting `MCU`, `BOARD`, or `TOOLCHAIN` variables, refer to the Makefile(s) in the repo.
+Notes:
 
-### Flash
+- `LEN` is the number of bytes that follow **excluding** itself.
+- The bootloader verifies CRC32 before executing the command.
 
-Flashing depends on your setup and tool (ST-LINK/OpenOCD/STM32CubeProgrammer). Refer to the existing project files and scripts in this repository for the correct memory map and flashing procedure.
+This matches the Python host implementation in `python/STM32_Programmer_V1.py` where `data_buf[0] = <len>-1`, and CRC is appended as 4 bytes.
 
-## Repository structure
+### MCU → Host response
 
-- `src/` (or similar): bootloader source code
-- `inc/` (or similar): headers
-- `Makefile`: build configuration
+The bootloader replies with either:
 
-> Folder names may differ—browse the repo for the exact layout.
+- **ACK**: 2 bytes
+  - `0xA5` (ACK)
+  - `follow_len` (number of bytes that will follow as payload)
+- **NACK**: 1 byte
+  - `0x7F` (NACK)
 
-## Notes
+After ACK, the bootloader sends `follow_len` bytes of payload depending on the command.
 
-- Ensure your **linker script** and **vector table** placement match the bootloader memory region.
-- Verify **application start address** and the bootloader’s jump-to-application logic.
+## Supported commands
 
-## License
+Command codes are defined in `bootloader_STM32F446xx/Core/Inc/main.h`:
 
-If a license file is present in the repository, it applies. Otherwise, licensing is currently unspecified.
+| Command | Code |
+|---|---:|
+| `BL_GET_VER` | `0x51` |
+| `BL_GET_HELP` | `0x52` |
+| `BL_GET_CID` | `0x53` |
+| `BL_GET_RDP_STATUS` | `0x54` |
+| `BL_GO_TO_ADDR` | `0x55` |
+| `BL_FLASH_ERASE` | `0x56` |
+| `BL_MEM_WRITE` | `0x57` |
+| `BL_ENDIS_RW_PROTECT` | `0x58` |
+| `BL_MEM_READ` | `0x59` |
+| `BL_READ_SECTOR_STATUS` | `0x5A` |
+| `BL_OTP_READ` | `0x5B` |
+
+Bootloader version macro:
+
+- `BL_VERSION = 0x10` (v1.0)
+
+## Flash layout
+
+In `bootloader_STM32F446xx/Core/Src/main.c`:
+
+- `FLASH_SECTOR2_BASE_ADDRESS = 0x08008000`
+
+This is typically used as the start address for the user application (sector 2 on STM32F446).
+
+## Host application (Python)
+
+A reference host tool is provided in:
+
+- `python/STM32_Programmer_V1.py`
+
+It constructs the command frames, computes CRC32, sends requests over a serial port, and decodes bootloader replies.
+
+## Build
+
+This is a STM32CubeIDE / STM32CubeMX generated project. You can:
+
+- Open the `bootloader_STM32F446xx` project in **STM32CubeIDE** and build.
+- Or build via Makefile if you have generated one for your environment.
+
+## Documentation
+
+You mentioned 2 PDFs describing:
+
+- the bootloader commands
+- frame formats sent/received by the host
+
+If these PDFs are added to the repository (or if you tell me their file paths), I can link them here and extract the exact command payload formats for each command.

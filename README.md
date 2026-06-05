@@ -4,20 +4,20 @@ Custom UART bootloader for STM32F446 with a Python host tool for command/flash o
 
 ## Repository contents
 
-- `/tmp/workspace/AhmedAmineSebti/Stm32-Custom-Bootloader/bootloader_STM32F446xx`  
+- `./bootloader_STM32F446xx`  
   STM32CubeIDE project containing the bootloader firmware (`Core/Src/main.c`, `Core/Inc/main.h`).
-- `/tmp/workspace/AhmedAmineSebti/Stm32-Custom-Bootloader/python/STM32_Programmer_V1.py`  
+- `./python/STM32_Programmer_V1.py`  
   Python serial host utility to send bootloader commands.
-- `/tmp/workspace/AhmedAmineSebti/Stm32-Custom-Bootloader/Bootloader Commands.pdf`  
+- `./Bootloader Commands.pdf`  
   Command reference.
-- `/tmp/workspace/AhmedAmineSebti/Stm32-Custom-Bootloader/commands format.pdf`  
+- `./commands format.pdf`  
   Packet format per command.
 
 ## Bootloader behavior
 
 From firmware (`main.c`):
 
-- If **PC13 button is pressed at reset**, MCU stays in bootloader mode and listens on UART.
+- If **PC13 button is pressed at reset** (Nucleo user button pulls PC13 low), MCU stays in bootloader mode and listens on UART.
 - Otherwise, it jumps to the user application at **`0x08008000`** (`FLASH_SECTOR2_BASE_ADDRESS`).
 
 ### UART configuration
@@ -33,7 +33,7 @@ All host commands follow:
 
 `[LEN][CMD][PAYLOAD...][CRC32]`
 
-- `LEN` = number of bytes to follow (does not include itself)
+- `LEN` = number of bytes to follow (includes `CMD`, payload, and `CRC32`, but excludes `LEN` itself)
 - `CMD` = bootloader command code
 - `CRC32` = 4 bytes (little-endian in host script)
 
@@ -60,7 +60,7 @@ Command codes defined in firmware (`main.h`):
 | `BL_READ_SECTOR_STATUS` | `0x5A` | Read sector protection status | Declared, handler empty |
 | `BL_OTP_READ` | `0x5B` | Read OTP | Declared, handler empty |
 
-> Note: The Python script also defines `0x5C` and `0x5D`, but those are not implemented in firmware.
+> Note: The Python script also defines `0x5C` (`BL_DIS_R_W_PROTECT`) and a template/example placeholder command `0x5D` (`BL_MY_NEW_COMMAND`) in its menu, but matching firmware handlers are not implemented in `main.c`.
 
 ## Packet format summary (from `commands format.pdf`)
 
@@ -95,7 +95,7 @@ pip install pyserial
 ### Run
 
 ```bash
-cd /tmp/workspace/AhmedAmineSebti/Stm32-Custom-Bootloader/python
+cd python
 python3 STM32_Programmer_V1.py
 ```
 

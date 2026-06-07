@@ -1,10 +1,10 @@
-20:55:57 **** Incremental Build of configuration Debug for project bootloader_STM32F446xx ****
+20:00:23 **** Incremental Build of configuration Debug for project bootloader_STM32F446xx ****
 make -j8 all 
 arm-none-eabi-size  bootloader_STM32F446xx.elf 
    text	   data	    bss	    dec	    hex	filename
-  17460	    132	   2252	  19844	   4d84	bootloader_STM32F446xx.elf
+  17612	    132	   2252	  19996	   4e1c	bootloader_STM32F446xx.elf
 Finished building: default.size.stdout
  
 
-20:56:00 Build Finished. 0 errors, 0 warnings. (took 2s.591ms)
+20:00:24 Build Finished. 0 errors, 0 warnings. (took 738ms)
 

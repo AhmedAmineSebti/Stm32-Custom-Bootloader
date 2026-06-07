@@ -41,8 +41,8 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define D_UART		&huart3
-#define C_UART      &huart2
+#define D_UART		&huart2
+#define C_UART      &huart3
 
 #define BL_RX_LEN	200
 /* USER CODE END PM */
@@ -329,12 +329,17 @@ void bootloader_uart_read_data(void)
 
 	while(1)
 	{
+		printmsg("I'm ready\n\r");
 		memset(bl_rx_buffer,0,200);
 		//here we will read and decode the commands coming from host
 		//first read only one byte from the host , which is the "length" field of the command
 		HAL_UART_Receive(C_UART, bl_rx_buffer, 1, HAL_MAX_DELAY);
 		rcv_len=bl_rx_buffer[0];
+
+
 		HAL_UART_Receive(C_UART, &bl_rx_buffer[1], rcv_len, HAL_MAX_DELAY);
+		printmsg("bl_rx_buffer[0]:%#x\n\r",bl_rx_buffer[0]);
+		printmsg("bl_rx_buffer[1]:%#x\n\r",bl_rx_buffer[1]);
 		switch(bl_rx_buffer[1])
 		{
 			case BL_GET_VER:
@@ -401,6 +406,9 @@ uint8_t bootloader_verify_crc(uint8_t *pData,uint32_t len,uint32_t crc_host)
 		uint32_t i_data = pData[i];
 		uwCRCValue = HAL_CRC_Accumulate(&hcrc, &i_data, 1);
 	}
+	  /* Reset CRC calculation unit */
+	__HAL_CRC_DR_RESET(&hcrc);
+	printmsg("%#x\n\r",uwCRCValue);
 
 	if( uwCRCValue == crc_host)
 	{
@@ -623,7 +631,8 @@ void bootloader_handle_mem_write_cmd(uint8_t *bl_rx_buffer)
 			//execute mem write
 			write_status= execute_mem_write(&bl_rx_buffer[7],mem_address,payload_len);
 			//turn off the led to indicate memory write is over
-			HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
+			HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 0);
+			bootloader_uart_write_data(&write_status,1);
 		}else
 		{
 			printmsg("BL_DEBUG_MSG: invalid mem write address\n");

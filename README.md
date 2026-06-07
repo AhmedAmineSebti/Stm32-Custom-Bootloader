@@ -1,277 +1,358 @@
-# STM32F446RE Custom Bootloader
+# STM32F4 Custom Bootloader
 
-A custom UART bootloader for the **STM32F446RE** (NUCLEO-F446RE) with a **Python host application** that communicates with it over the ST-Link virtual COM port (USART2). On reset, the MCU checks the onboard blue button (PC13): held down → bootloader mode; released → jumps to the user application at Flash Sector 2.
+A fully custom bootloader for the **STM32F446RE** microcontroller, supporting firmware updates over UART with two host interfaces: a **Python desktop application** and a **wireless ESP32 web interface** with SD card support.
 
 ---
 
 ## Table of Contents
 
-- [System Architecture](#system-architecture)
-- [Hardware](#hardware)
-- [Memory Map](#memory-map)
-- [Communication Interface](#communication-interface)
-- [ACK / NACK Protocol](#ack--nack-protocol)
-- [CRC-32 Algorithm](#crc-32-algorithm)
-- [Packet Structure](#packet-structure)
-- [Supported Commands](#supported-commands)
-  - [BL\_GET\_VER (0x51)](#bl_get_ver-0x51)
-  - [BL\_GET\_HELP (0x52)](#bl_get_help-0x52)
-  - [BL\_GET\_CID (0x53)](#bl_get_cid-0x53)
-  - [BL\_GET\_RDP\_STATUS (0x54)](#bl_get_rdp_status-0x54)
-  - [BL\_GO\_TO\_ADDR (0x55)](#bl_go_to_addr-0x55)
-  - [BL\_FLASH\_ERASE (0x56)](#bl_flash_erase-0x56)
-  - [BL\_MEM\_WRITE (0x57)](#bl_mem_write-0x57)
-  - [Stub Commands](#stub-commands)
-- [STM32 Firmware – Implementation Details](#stm32-firmware--implementation-details)
-- [Python Host – Implementation Details](#python-host--implementation-details)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [Debug Output](#debug-output)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Repository Structure](#repository-structure)
+- [STM32 Bootloader](#stm32-bootloader)
+  - [Supported Commands](#supported-commands)
+  - [Communication Protocol](#communication-protocol)
+  - [CRC Verification](#crc-verification)
+  - [Memory Map](#memory-map)
+- [Python Host Application](#python-host-application)
+  - [Requirements](#requirements)
+  - [Usage](#usage)
+- [ESP32 Wireless Host](#esp32-wireless-host)
+  - [Features](#features)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Wiring](#wiring)
+  - [Configuration](#configuration)
+  - [Web Interface](#web-interface)
+  - [Flashing Workflow](#flashing-workflow)
+- [How to Flash a New Application](#how-to-flash-a-new-application)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## System Architecture
+## Overview
 
-```
- +--------------------------------------------------+
- |               Host PC                            |
- |                                                  |
- |   STM32_Programmer_V1.py                          |
- |   ├── Interactive menu (1-8)                     |
- |   ├── Packet builder per command                 |
- |   ├── CRC-32 engine (matches STM32 HW CRC)       |
- |   └── ACK/NACK parser                            |
- |                  |                               |
- |            pyserial 115200 8N1                   |
- |                  |                               |
- |         USB (ST-Link virtual COM)                |
- +------------------+-------------------------------+
-                    |
- +------------------+-------------------------------+
- |          NUCLEO-F446RE                           |
- |                                                  |
- |  USART2  PA2(TX) / PA3(RX)  <-- command channel |
- |  USART3  PB10/PB11           --> debug messages  |
- |  PC13    blue button         --> BL activation   |
- |  PA5     LD2 LED             --> flash activity  |
- |                                                  |
- |  +---------------+  +---------------------------+|
- |  |  Bootloader   |  |    User Application       ||
- |  | Sectors 0-1   |  |  Sector 2 @ 0x08008000   ||
- |  | 0x08000000    |  |                           ||
- |  +---------------+  +---------------------------+|
- +--------------------------------------------------+
-```
+This project implements a custom UART bootloader on the STM32F446RE from scratch, without relying on the built-in ST bootloader. It allows a host machine to:
+
+- Query bootloader version, chip ID, and RDP status
+- Jump to any valid memory address
+- Erase specific flash sectors or perform a full mass erase
+- Write a compiled `.bin` firmware image to flash memory
+
+Two host interfaces are provided depending on the use case:
+
+| Interface | Connection | Use Case |
+|---|---|---|
+| Python script | USB-to-UART (direct COM port) | Development, debugging |
+| ESP32 web UI | WiFi (browser-based) | Wireless OTA-style updates via SD card |
 
 ---
 
-## Hardware
-
-| Item | Details |
-|------|---------|
-| MCU | STM32F446RE – ARM Cortex-M4 @ 84 MHz |
-| Board | NUCLEO-F446RE |
-| BL activation | PC13 – blue button, active LOW |
-| Command UART | USART2 – PA2 (TX) / PA3 (RX) via ST-Link USB |
-| Debug UART | USART3 – PB10 (TX) / PB11 (RX) at 115200 baud |
-| Flash activity LED | PA5 – LD2 (green), ON during erase/write |
-| Internal Flash | 512 KB |
-| SRAM1 | 112 KB |
-| SRAM2 | 16 KB |
-| Backup SRAM | 4 KB |
-| Host | Any PC with Python 3 and pyserial |
-
----
-
-## Memory Map
-
-| Region | Start | End | Size | Usage |
-|--------|-------|-----|------|-------|
-| Flash Sector 0 | `0x08000000` | `0x08003FFF` | 16 KB | Bootloader |
-| Flash Sector 1 | `0x08004000` | `0x08007FFF` | 16 KB | Bootloader (overflow) |
-| **Flash Sector 2** | **`0x08008000`** | `0x0800BFFF` | 16 KB | **User app start** |
-| Flash Sectors 3–7 | `0x0800C000` | `0x0807FFFF` | ~464 KB | User app continuation |
-| SRAM1 | `0x20000000` | `0x2001BFFF` | 112 KB | Stack / heap |
-| SRAM2 | `0x2001C000` | `0x2001FFFF` | 16 KB | |
-| Backup SRAM | `0x40024000` | `0x40024FFF` | 4 KB | |
-
-The user application binary must be linked to start at **`0x08008000`**. The bootloader reads the initial MSP from this address and the reset handler from `0x08008004`.
-
----
-
-## Communication Interface
-
-| Parameter | Value |
-|-----------|-------|
-| Peripheral | USART2 |
-| Baud rate | 115200 |
-| Word length | 8 bits |
-| Stop bits | 1 |
-| Parity | None |
-| Flow control | None |
-
-The ST-Link bridge exposes USART2 as a virtual COM port over USB — no extra hardware needed.
-
----
-
-## ACK / NACK Protocol
-
-Every command gets a response before the payload is sent.
-
-**ACK — CRC passed:**
-```
-Byte 0: 0xA5          (BL_ACK)
-Byte 1: len_to_follow (number of payload bytes that follow)
-```
-
-**NACK — CRC failed:**
-```
-Byte 0: 0x7F          (BL_NACK)
-```
-
-The Python host reads these bytes first, checks for `0xA5`, then reads exactly `len_to_follow` more bytes.
-
----
-
-## CRC-32 Algorithm
-
-Both sides use a CRC-32 compatible with the STM32 hardware CRC peripheral. The Python host computes CRC and appends it **little-endian** as 4 bytes.
-
----
-
-## Packet Structure
-
-### Host → MCU
+## Architecture
 
 ```
-+------------------+---------------+------------------+---------------+
-| Length to Follow |  Command Code |  Payload (0-N B) |    CRC-32     |
-|    (1 byte)      |   (1 byte)    |                  |   (4 bytes)   |
-+------------------+---------------+------------------+---------------+
-        ^
-        = (total packet bytes) - 1
-```
-
-### MCU → Host
-
-```
-Success:  [ 0xA5 | len_to_follow | payload... ]
-Failure:  [ 0x7F ]
+┌─────────────────────────────────────────────────────┐
+│                   Host Side                         │
+│                                                     │
+│  ┌──────────────────┐     ┌──────────────────────┐  │
+│  │  Python Script   │     │  ESP32 + Web UI      │  │
+│  │  (COM port)      │     │  (WiFi + SD card)    │  │
+│  └────────┬─────────┘     └──────────┬───────────┘  │
+│           │ UART 115200              │ UART 115200   │
+└───────────┼──────────────────────────┼───────────────┘
+            │                          │
+            └──────────┬───────────────┘
+                       │
+            ┌──────────▼───────────┐
+            │   STM32F446RE        │
+            │   Custom Bootloader  │
+            │   @ 0x08000000       │
+            ├──────────────────────┤
+            │   User Application   │
+            │   @ 0x08008000       │
+            └──────────────────────┘
 ```
 
 ---
 
-## Supported Commands
+## Repository Structure
 
-Command codes are defined in `bootloader_STM32F446xx/Core/Inc/main.h`.
-
-### BL_GET_VER (0x51)
-
-Returns the bootloader version (`BL_VERSION`). Current value: **`0x10`** (v1.0).
-
-### BL_GET_HELP (0x52)
-
-Returns all supported command codes.
-
-### BL_GET_CID (0x53)
-
-Reads the device ID.
-
-### BL_GET_RDP_STATUS (0x54)
-
-Reads Flash Read Protection level.
-
-### BL_GO_TO_ADDR (0x55)
-
-Validates then jumps to the given address.
-
-### BL_FLASH_ERASE (0x56)
-
-Erases one or more sectors. Use sector `0xFF` for mass erase.
-
-### BL_MEM_WRITE (0x57)
-
-Writes a chunk of data to memory (typically Flash at/after `0x08008000`).
-
-### Stub Commands
-
-These commands are defined and dispatched but may not be fully implemented depending on the handler code:
-
-| Command | Code | Description |
-|---------|------|-------------|
-| `BL_ENDIS_RW_PROTECT` | `0x58` | Enable/disable per-sector R/W protection |
-| `BL_MEM_READ` | `0x59` | Read from memory |
-| `BL_READ_SECTOR_STATUS` | `0x5A` | Read sector protection status |
-| `BL_OTP_READ` | `0x5B` | Read OTP |
+```
+stm32-bootloader/
+│
+├── stm32/                        # STM32 bootloader firmware (STM32CubeIDE)
+│   ├── Core/
+│   │   ├── Src/
+│   │   │   ├── main.c
+│   │   │   ├── bootloader.c      # Command handlers
+│   │   │   └── ...
+│   │   └── Inc/
+│   │       └── bootloader.h
+│   └── ...
+│
+├── python/                       # Python host application
+│   └── STM32_Programmer_V1.py
+│
+├── esp32/                        # ESP32 wireless host (PlatformIO)
+│   ├── src/
+│   │   └── bootloader_host.cpp
+│   └── platformio.ini
+│
+└── README.md
+```
 
 ---
 
-## STM32 Firmware – Implementation Details
+## STM32 Bootloader
 
-### Bootloader Activation
+The bootloader resides in flash sector 0 starting at `0x08000000`. On power-up it checks a condition (GPIO pin or flag) to decide whether to stay in bootloader mode or jump to the user application at `0x08008000`.
 
-In `bootloader_STM32F446xx/Core/Src/main.c`:
+### Supported Commands
 
-- If PC13 is pressed (active LOW), the firmware enters the bootloader UART loop.
-- Otherwise it jumps to the user application.
+| Code | Command | Description |
+|---|---|---|
+| `0x51` | `BL_GET_VER` | Returns bootloader version byte |
+| `0x52` | `BL_GET_HELP` | Returns list of all supported command codes |
+| `0x53` | `BL_GET_CID` | Returns 2-byte chip ID from DBGMCU |
+| `0x54` | `BL_GET_RDP_STATUS` | Returns flash read protection level |
+| `0x55` | `BL_GO_TO_ADDR` | Jumps execution to a given 32-bit address |
+| `0x56` | `BL_FLASH_ERASE` | Erases one or more sectors, or mass-erases all |
+| `0x57` | `BL_MEM_WRITE` | Writes a payload of up to 128 bytes to flash |
 
-### UART Channels
+### Communication Protocol
 
-| Macro | Peripheral | Role |
-|-------|-----------|------|
-| `C_UART` | USART2 | Command channel (host ↔ bootloader) |
-| `D_UART` | USART3 | Debug `printmsg()` output |
+Every command follows the same frame structure:
 
-Debug output is enabled by `#define BL_DEBUG_MSG_EN` in `main.c`.
+```
+Host → STM32:
+┌──────────────┬─────────┬─────────────────┬──────────────┐
+│ len_to_follow│ CMD code│ Payload (varies)│  CRC32 (4B)  │
+│    1 byte    │  1 byte │   0–N bytes     │   4 bytes    │
+└──────────────┴─────────┴─────────────────┴──────────────┘
+
+STM32 → Host (ACK):
+┌────────┬──────────────┬────────────────────────┐
+│  0xA5  │ len_to_follow│  Response bytes         │
+│ 1 byte │   1 byte     │  (command-specific)     │
+└────────┴──────────────┴────────────────────────┘
+
+STM32 → Host (NACK):
+┌────────┐
+│  0x7F  │
+└────────┘
+```
+
+`len_to_follow` in the command frame is `total_packet_length - 1` (excludes itself, includes everything else).
+
+**BL_MEM_WRITE frame in detail:**
+
+```
+[len_to_follow | 0x57 | addr_b0 | addr_b1 | addr_b2 | addr_b3 | payload_len | payload (N bytes) | CRC (4 bytes)]
+     [0]           [1]     [2]       [3]       [4]       [5]         [6]         [7 .. 6+N]         [7+N .. 10+N]
+```
+
+### CRC Verification
+
+A standard CRC-32 with polynomial `0x04C11DB7` is computed over all bytes from `len_to_follow` up to (but not including) the trailing 4 CRC bytes. The STM32 computes the same CRC and sends NACK (`0x7F`) if they do not match.
+
+**Important:** The CRC must be calculated **after** all payload bytes are placed in the buffer — calculating it before filling the payload is a common bug that results in consistent NACK responses.
+
+### Memory Map
+
+```
+0x08000000  ┌─────────────────────┐
+            │  Bootloader         │  Sector 0 (16 KB)
+0x08004000  ├─────────────────────┤
+            │  (reserved)         │  Sector 1 (16 KB)
+0x08008000  ├─────────────────────┤
+            │  User Application   │  Sectors 2–7
+            │                     │
+0x08080000  └─────────────────────┘
+```
 
 ---
 
-## Python Host – Implementation Details
+## Python Host Application
 
-The host application is in:
-
-- `python/STM32_Programmer_V1.py`
-
-It builds the command frames, appends CRC, sends over serial using `pyserial`, and parses ACK/NACK + payload.
+A terminal-based host that communicates with the STM32 bootloader directly over a serial (COM/tty) port.
 
 ### Requirements
 
+```
+Python 3.x
+pyserial
+```
+
+Install with:
 ```bash
 pip install pyserial
 ```
 
----
+### Usage
 
-## Project Structure
-
-```
-.
-├─ bootloader_STM32F446xx/          STM32CubeIDE project
-│  ├─ Core/
-│  │  ├─ Inc/                       main.h (command codes/macros)
-│  │  └─ Src/                       main.c (bootloader logic)
-│  └─ Drivers/                      HAL + CMSIS
-├─ python/                          Python host application
-│  └─ STM32_Programmer_V1.py
-└─ README.md
+```bash
+python STM32_Programmer_V1.py
 ```
 
+You will be prompted to enter the serial port name (e.g. `COM3` on Windows, `/dev/ttyUSB0` on Linux), then a menu appears:
+
+```
+ +==========================================+
+ |               Menu                       |
+ |         STM32F4 BootLoader v1            |
+ +==========================================+
+
+   BL_GET_VER                            --> 1
+   BL_GET_HLP                            --> 2
+   BL_GET_CID                            --> 3
+   BL_GET_RDP_STATUS                     --> 4
+   BL_GO_TO_ADDR                         --> 5
+   BL_FLASH_MASS_ERASE                   --> 6
+   BL_FLASH_ERASE                        --> 7
+   BL_MEM_WRITE                          --> 8
+   MENU_EXIT                             --> 0
+```
+
+To flash a new application, place the compiled `.bin` file named `user_app.bin` in the same directory as the Python script, then run commands `7` (erase) followed by `8` (write).
+
+> **Note:** The serial port timeout is set to 10 seconds to allow for slow flash write operations. Do not reduce this value.
+
 ---
 
-## Getting Started
+## ESP32 Wireless Host
 
-1. Flash the bootloader to `0x08000000`.
-2. Hold the **blue button** (PC13), press RESET to enter bootloader mode.
-3. Run the Python host script and use the menu to send commands.
-4. To program a user app:
-   - Erase sector 2 (or mass erase)
-   - Write app binary to `0x08008000` using `BL_MEM_WRITE`
-   - Jump to `0x08008000` with `BL_GO_TO_ADDR`
+An ESP32 acts as a wireless bridge between a browser-based interface and the STM32 bootloader over UART. The firmware binary is stored on a **FAT32 SD card** inserted into the ESP32's SPI SD module.
+
+### Features
+
+- Browser-based control panel accessible from any device on the same WiFi network
+- Live terminal output streamed to the browser via **Server-Sent Events (SSE)** — no page refresh needed
+- SD card support for reading `user_app.bin` and streaming it in 128-byte chunks
+- Busy-state locking prevents concurrent commands
+- All commands still echoed to the PlatformIO serial monitor in parallel
+
+### Hardware Requirements
+
+- ESP32 development board (tested on ESP32-WROOM-32 / ESP32 DevKit)
+- SPI SD card module
+- Micro SD card (FAT32 formatted)
+- Jumper wires
+
+### Wiring
+
+**ESP32 → STM32 (UART):**
+
+| ESP32 Pin | STM32 Pin |
+|---|---|
+| GPIO 17 (TX2) | USART3 RX |
+| GPIO 16 (RX2) | USART3 TX |
+| GND | GND |
+
+**ESP32 → SD Card Module (SPI):**
+
+| SD Module | ESP32 Pin |
+|---|---|
+| MOSI | GPIO 23 |
+| MISO | GPIO 19 |
+| SCK | GPIO 18 |
+| CS | GPIO 5 |
+| VCC | 3.3V |
+| GND | GND |
+
+### Configuration
+
+Open `esp32/src/bootloader_host.cpp` and set your WiFi credentials:
+
+```cpp
+#define WIFI_SSID   "your_network_name"
+#define WIFI_PASS   "your_password"
+```
+
+`platformio.ini`:
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+monitor_filters = send_on_enter
+```
+
+After flashing, open the serial monitor — the ESP32 will print its assigned IP address:
+```
+Connected! IP address: 192.168.1.105
+Open the above IP in your browser.
+```
+
+### Web Interface
+
+Open the IP address in any browser on the same network. The interface has four panels:
+
+| Panel | Commands |
+|---|---|
+| Read Info | Get Version, Get Help, Get Chip ID, Get RDP Status |
+| Jump | BL_GO_TO_ADDR with hex address input |
+| Flash Erase | Mass erase button + sector erase with sector number and count inputs |
+| Flash Write | BL_MEM_WRITE with base address input — reads `user_app.bin` from SD card |
+
+The terminal panel at the bottom streams all responses live as they arrive from the STM32.
+
+### Flashing Workflow
+
+1. Compile your STM32 user application and export the `.bin` file
+2. Copy it to the SD card root as `user_app.bin`
+3. Insert the SD card into the ESP32 SD module
+4. Open the web interface in a browser
+5. Use **Flash Erase → Sector Erase**: sector `2`, count `6` (for a 384 KB app at `0x08008000`)
+6. Use **Flash Write → Write user_app.bin**: base address `08008000`
+7. Watch the terminal for progress and completion confirmation
+8. Reset the STM32 — it will boot into the new application
 
 ---
 
-## Debug Output
+## How to Flash a New Application
 
-Debug is sent over USART3 when `BL_DEBUG_MSG_EN` is enabled.
+Regardless of which host interface you use, the sequence is always:
 
-To disable debug output, comment out `#define BL_DEBUG_MSG_EN` in `bootloader_STM32F446xx/Core/Src/main.c`.
+```
+1. Hold STM32 in bootloader mode (hold button / set BOOT0 high)
+2. Power on / reset STM32
+3. Erase target flash sectors
+4. Write new firmware
+5. Release bootloader mode
+6. Reset STM32 → runs new application
+```
+
+**Sector reference for STM32F446RE:**
+
+| Sector | Start Address | Size |
+|---|---|---|
+| 0 | 0x08000000 | 16 KB |
+| 1 | 0x08004000 | 16 KB |
+| 2 | 0x08008000 | 16 KB |
+| 3 | 0x0800C000 | 16 KB |
+| 4 | 0x08010000 | 64 KB |
+| 5 | 0x08020000 | 128 KB |
+| 6 | 0x08040000 | 128 KB |
+| 7 | 0x08060000 | 128 KB |
+
+---
+
+## Troubleshooting
+
+**CRC always fails (NACK on every command)**
+CRC must be computed after all payload bytes are written to the buffer. Verify the order: fill payload → compute CRC → append CRC bytes.
+
+**Timeout after first MEM_WRITE chunk**
+The STM32 sends the ACK immediately but the write status byte comes after the flash operation completes. Use a serial timeout of at least 10 seconds. Verify that `bootloader_uart_write_data(&write_status, 1)` is called after `execute_mem_write()` in the STM32 handler for valid addresses — not just for invalid ones.
+
+**256 bytes written then crash**
+This is the missing status byte bug described above. The leftover status byte from chunk 1 corrupts the ACK read of chunk 2. Fix: ensure the STM32 always sends the status byte for valid addresses.
+
+**SD card mount fails**
+Ensure the card is formatted as FAT32 (not exFAT). Some SD cards above 32 GB default to exFAT — reformat them with a tool like SD Card Formatter.
+
+**ESP32 web interface not reachable**
+Check the serial monitor for the IP address printed on boot. Make sure your phone or laptop is on the same WiFi network as the ESP32.
+
+**PlatformIO serial monitor sends each character immediately**
+Add `monitor_filters = send_on_enter` to `platformio.ini` so input is buffered until you press Enter.
